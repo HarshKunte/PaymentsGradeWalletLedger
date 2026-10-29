@@ -1,0 +1,33 @@
+spring:
+  datasource:
+    url: ${DB_URL:jdbc:postgresql://localhost:5432/wallet}
+    username: ${DB_USER:wallet}
+    password: ${DB_PASSWORD:wallet}
+    hikari:
+      maximum-pool-size: 30
+      connection-timeout: 60000
+  flyway:
+    enabled: true
+  jackson:
+    property-naming-strategy: SNAKE_CASE
+    serialization:
+      write-dates-as-timestamps: false
+    deserialization:
+      accept-float-as-int: false   # 10.5 must be rejected, never silently truncated to 10
+server:
+  port: ${SERVER_PORT:8080}
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health
+wallet:
+  admin-token: ${ADMIN_TOKEN:dev-admin-token}
+  zone: ${WALLET_ZONE:Asia/Kolkata}
+  scheduler:
+    enabled: ${WALLET_SCHEDULER_ENABLED:false}   # true only in the worker container
+    cron: ${WALLET_SCHEDULER_CRON:0 30 1 * * *}
+  llm:
+    provider: ${LLM_PROVIDER:mock}               # mock | anthropic
+    api-key: ${ANTHROPIC_API_KEY:}
+    model: ${LLM_MODEL:claude-haiku-5-5}

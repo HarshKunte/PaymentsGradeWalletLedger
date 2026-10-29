@@ -1,0 +1,9 @@
+target/
+.idea/
+*.iml
+.vscode/
+.gradle/
+gradle/
+build/
+docker/
+./gradle-8.10.2

@@ -1,0 +1,9 @@
+spring:
+  flyway:
+    clean-disabled: false
+wallet:
+  admin-token: test-admin
+  scheduler:
+    enabled: false
+  llm:
+    provider: mock

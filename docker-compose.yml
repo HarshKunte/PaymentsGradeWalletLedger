@@ -1,0 +1,61 @@
+services:
+  db:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: wallet
+      POSTGRES_PASSWORD: wallet
+      POSTGRES_DB: wallet
+    ports: ["5432:5432"]
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./docker/initdb:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U wallet -d wallet"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+
+  api:
+    build: .
+    depends_on:
+      db: { condition: service_healthy }
+    environment: &app-env
+      DB_URL: jdbc:postgresql://db:5432/wallet
+      DB_USER: wallet
+      DB_PASSWORD: wallet
+      ADMIN_TOKEN: ${ADMIN_TOKEN:-dev-admin-token}
+      LLM_PROVIDER: ${LLM_PROVIDER:-mock}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      LLM_MODEL: ${LLM_MODEL:-claude-haiku-5-5}
+      WALLET_SCHEDULER_ENABLED: "false"
+    ports: ["8080:8080"]
+
+  # Same image, but this container owns the nightly schedule (reconciliation, flag explanations, key cleanup).
+  worker:
+    build: .
+    depends_on:
+      db: { condition: service_healthy }
+    environment:
+      <<: *app-env
+      WALLET_SCHEDULER_ENABLED: "true"
+      SERVER_PORT: "8081"
+
+  # docker compose --profile test run --rm tests     -> runs every test against the compose Postgres
+  tests:
+    profiles: ["test"]
+    image: gradle:8.10.2-jdk21
+    working_dir: /app
+    depends_on:
+      db: { condition: service_healthy }
+    environment:
+      TEST_DB_URL: jdbc:postgresql://db:5432/wallet_test
+      TEST_DB_USER: wallet
+      TEST_DB_PASSWORD: wallet
+    volumes:
+      - .:/app
+      - gradle-cache:/home/gradle/.gradle
+    command: ./gradlew --no-daemon test
+
+volumes:
+  pgdata:
+  gradle-cache:
