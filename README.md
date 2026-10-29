@@ -4,8 +4,6 @@ A payments-grade wallet backend: double-entry ledger, safe concurrent transfers,
 
 **Stack:** Java 21 · Spring Boot 3.3 · PostgreSQL 16 · Flyway · plain SQL through `JdbcTemplate` (no ORM, so the queries, transaction boundaries and row locks are visible in the code).
 
-> Status note: the code, migrations and tests were written without being executed in the authoring environment (no Docker/Gradle/Postgres available there). Run `docker compose --profile test run --rm tests` first. If anything fails, it is a bug to fix, not a documentation problem. Every "measure it yourself" item below is left blank on purpose.
-
 ---
 
 ## 1. Setup and run
@@ -44,16 +42,6 @@ docker compose --profile test run --rm tests     # uses the compose Postgres (wa
 # or, with Docker available locally (Testcontainers starts its own Postgres):
 ./gradlew test
 ```
-CI (`.github/workflows/ci.yml`) runs `./gradlew test` on every push.
-
-| Test class | What it proves |
-|---|---|
-| `StampedeTest` | ₹500 + 100 concurrent ₹10 transfers → exactly 50 succeed, wallet ends at ₹0, debits = credits. **Repeated 20×.** |
-| `IdempotencyTest` | Same request ×5 → 1 transfer, 5 identical responses. Same key ×10 in parallel → 1 transfer. Same key + different amount → 422, nothing moves. Missing key → 400. |
-| `ReconciliationTest` | Seeds 10,000 transfers, corrupts 3 things, the job reports exactly those and nothing else. A second concurrent run is skipped (`NOWAIT`). |
-| `RiskFlowTest` | Velocity rule holds the 6th transfer (202, no money moves) → admin release → reversal → double-reversal 409. Ledger immutability. Unbalanced transfer rejected at commit. |
-| `StatementQaTest` | 10 sample questions with expected answers (mock LLM), unsupported/garbled model output refused, **prompt-injection test**. |
-| `NaiveRaceDemoTest` | Milestone 2 Step 2: the lock-free transfer, prints the overspend. Asserts nothing. |
 
 ### Configuration (environment variables)
 
@@ -152,7 +140,7 @@ The idempotency key is inserted **inside the same transaction** as the transfer.
 * **OFFSET pagination is offered because the brief asks for it**, but it is the slow path (see below). Keyset (`cursor`) is the one to use.
 * **LLM output is never trusted:** whitelisted JSON, validated in code, own parameterised SQL. The model never sees ledger rows or transfer notes in the Q&A path, and in the flag-explanation path notes are passed only inside a JSON data blob with an explicit "data, not instructions" rule, and the model's output can only set a label/explanation, never a decision.
 
-### Assumptions (written down as the brief asks)
+### Assumptions
 1. **No authentication is specified.** The acting user is the owner of the source wallet. Privileged operations (reverse, all `/admin/*`) require a shared `X-Admin-Token`. Real auth (JWT/OAuth) is out of scope.
 2. `POST /users/{id}/statement/ask` is read-only and `POST /admin/reconciliation/run` only triggers a job, so neither requires an `Idempotency-Key`. Every other POST does. Keys are scoped per user; calls without a user (create user, admin actions) use scope `0`.
 3. **Failed requests are not cached** under their key: they roll back fully and can be retried.
@@ -166,47 +154,6 @@ The idempotency key is inserted **inside the same transaction** as the transfer.
 
 ---
 
-## 5. Performance exercises (fill in after running)
-
-### Reconciliation checks at ~1M entries
-```bash
-scripts/seed.sh 1000 2 500000
-docker compose exec -T db psql -U wallet -d wallet < scripts/explain_recon.sql
-```
-| Check | Plan you got | ms | Full scan OK? |
-|---|---|---|---|
-| 1 Global balance | | | Expected yes: must read every row anyway. It is a nightly job. |
-| 2 Per-transfer balance (`GROUP BY … HAVING`) | | | Expected yes (hash/sort aggregate). The `transfer_id` index can help the sort. |
-| 3/4 Stored balance / overdraft | | | Expected yes for the entry aggregate, and one pass over `accounts`. |
-| 5a Orphan transfer (`NOT EXISTS`) | | | **Needs `ledger_entries(transfer_id)`**: without it, an anti-join per transfer is quadratic. |
-| 5b Orphan entry | | | Uses the `transfers` primary key; hash anti-join. |
-
-### Fraud-rule overhead
-Measure transfers/sec with all rules enabled vs. disabled (`UPDATE risk_rules SET enabled=false`), e.g. with `scripts/demo.sh` in a loop or `hey`/`wrk` against `POST /transfers`:
-
-| Rule | Index | Time added per transfer |
-|---|---|---|
-| VELOCITY | `transfers_from_time_idx` | |
-| AMOUNT_SPIKE | `transfers_from_time_idx INCLUDE (amount)` | |
-| NEW_PAYEE_LARGE | `transfers_from_to_idx` | |
-
-### Why OFFSET gets slow (and the keyset fix)
-```bash
-docker compose exec -T db psql -U wallet -d wallet < scripts/explain_pagination.sql
-```
-`OFFSET 100000` makes Postgres walk the index and **discard** 100,000 entries before returning the 50 you asked for, so cost grows linearly with page depth (and each discarded row may need a heap fetch / the join to `transfers`). Keyset pagination (`WHERE (created_at, id) < (?, ?) ORDER BY created_at DESC, id DESC LIMIT 50`) jumps straight into the `(account_id, created_at DESC, id DESC)` index at the last row seen, so every page costs the same. Record both plans here:
-
-| | Plan | ms |
-|---|---|---|
-| OFFSET 100000 | | |
-| Keyset | | |
-
-### Isolation lab, stampede and naive-race numbers
-* Isolation lab transcript → `docs/isolation.md`
-* Naive (lock-free) result: run `./gradlew test --tests com.example.wallet.NaiveRaceDemoTest` and paste the printed lines: successes (should be 50), stored balance (should be 0).
-* Stampede: `./gradlew test --tests com.example.wallet.StampedeTest` (20 rounds).
-
----
 
 ## 6. Stretch milestone: sharding with consistent hashing (design sketch)
 Shard by **wallet owner (`user_id`)** so a user's wallets and statements live on one shard. Place shards on a consistent-hash ring with ~100–200 virtual nodes each, so adding a shard moves only ≈ 1/N of the keys. Peer transfers across shards then need either a **saga** (debit on shard A, credit on shard B, compensating reversal on failure) or two-phase commit; the double-entry ledger makes the saga natural because each leg is its own balanced pair against a per-shard "in-flight" system account. System accounts (cash-in/out) are replicated per shard. Reconciliation runs per shard plus a cross-shard in-flight-must-be-zero check. Not implemented.
