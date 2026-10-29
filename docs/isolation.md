@@ -29,12 +29,13 @@ UPDATE accounts SET balance = 900 WHERE id = W1;    -- autocommit: committed imm
 SELECT balance FROM accounts WHERE id = W1;         -- same transaction, second read
 COMMIT;
 ```
-**Expected:** A's second read returns **900**. Each statement gets a fresh snapshot, so A sees B's committed change in the middle of its own transaction (a *non-repeatable read*).
-Why it matters: "read balance, check in code, then write" is unsafe at this level, hence the `FOR UPDATE` row lock in the transfer code.
 
-**Your output:**
+**Output:**
 ```
-(paste here)
+ balance
+---------
+     900
+(1 row)
 ```
 
 ## Case 2: REPEATABLE READ
@@ -51,11 +52,17 @@ SELECT balance FROM accounts WHERE id = W1;         -- ?
 UPDATE accounts SET balance = balance - 50 WHERE id = W1;   -- ?
 ROLLBACK;
 ```
-**Expected:** A's second read still returns **1000**, because one snapshot lasts the whole transaction. A's `UPDATE` of the row that B changed after the snapshot fails with `ERROR: could not serialize access due to concurrent update` (SQLSTATE `40001`). Postgres refuses to let A overwrite a change it never saw, so the application must retry.
 
 **Your output:**
 ```
-(paste here)
+wallet=*# SELECT balance FROM accounts WHERE id = 6;
+ balance
+---------
+    1000
+(1 row)
+
+wallet=*# UPDATE accounts SET balance = balance - 50 WHERE id = 6;
+ERROR:  could not serialize access due to concurrent update
 ```
 
 ## Case 3: SERIALIZABLE (write skew)
@@ -77,13 +84,15 @@ COMMIT;                                                    -- succeeds
 UPDATE accounts SET balance = balance - 1000 WHERE id = W2;
 COMMIT;                                                    -- ?
 ```
-**Expected:** the first committer wins. B fails, at the `UPDATE` or at `COMMIT`, with
-`ERROR: could not serialize access due to read/write dependencies among transactions` (SQLSTATE `40001`).
-Under REPEATABLE READ both would have committed and left the sum at 0 (write skew). Serializable detects the dangerous pattern and aborts one transaction; the client must **retry the whole transaction**.
 
 **Your output:**
 ```
-(paste here)
+wallet=*# UPDATE accounts SET balance = balance - 1000 WHERE id = 7;
+COMMIT;
+ERROR:  could not serialize access due to read/write dependencies among transactions
+DETAIL:  Reason code: Canceled on identification as a pivot, during write.
+HINT:  The transaction might succeed if retried.
+ROLLBACK
 ```
 
 ## Case 4: REPEATABLE READ with a join
@@ -105,11 +114,16 @@ FROM accounts a LEFT JOIN transfers t ON t.from_account_id = a.id
 WHERE a.id = W1 GROUP BY a.balance;                 -- ?
 ROLLBACK;
 ```
-**Expected:** still **1000 | 0**. The guarantee holds across joins: the snapshot belongs to the *transaction*, not to a table, so every table touched in the join is read as of the same moment. This is why the nightly reconciliation job runs all its checks in one REPEATABLE READ transaction. (Postgres' REPEATABLE READ is snapshot isolation; it also prevents phantom rows, which the SQL standard does not require at this level.)
 
 **Your output:**
 ```
-(paste here)
+wallet=*# SELECT a.balance, count(t.id) AS transfers
+FROM accounts a LEFT JOIN transfers t ON t.from_account_id = a.id
+WHERE a.id = 6 GROUP BY a.balance;
+ balance | transfers
+---------+-----------
+    1000 |         0
+(1 row)
 ```
 
 ## Cleanup
